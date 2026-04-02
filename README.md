@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ✈️ CREW Horizon — Airlines Crew Management System
 
 > **Production-ready, cloud-native microservices platform for airline crew scheduling, management, and compliance.**
@@ -290,3 +291,7 @@ All services emit JSON-formatted logs for ELK/Grafana Loki ingestion:
 ## 📄 License
 
 Copyright © 2024 CREW Horizon. All rights reserved.
+=======
+# crew-horizon
+crew management
+>>>>>>> da9498b6563d05cf721844497e636541cb8d4ab9
