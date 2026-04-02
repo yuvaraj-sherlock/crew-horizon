@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ============================================================
+  CREW HORIZON - Parent POM
+  ============================================================
+  WHAT: This is the root Maven parent POM that manages all
+        microservices under the CREW Horizon platform.
+
+  WHY:  Using a parent POM in enterprise microservices ensures:
+        1. Consistent dependency versions across all services
+           (avoiding version conflicts — "Dependency Hell")
+        2. Shared plugin configurations (compiler, surefire, etc.)
+        3. Single source of truth for Spring Boot BOM management
+        4. Enables multi-module builds during CI/CD pipelines
+  ============================================================
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+         https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!-- Spring Boot Parent provides dependency management and default plugin config -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.2.4</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.crewhorizon</groupId>
+    <artifactId>crew-horizon-parent</artifactId>
+    <version>1.0.0</version>
+    <packaging>pom</packaging>
+    <name>CREW Horizon - Parent</name>
+    <description>Airlines Crew Management System - Enterprise Microservices Platform</description>
+
+    <!-- All child microservice modules -->
+    <modules>
+        <module>api-gateway</module>
+        <module>auth-service</module>
+        <module>crew-service</module>
+        <module>flight-service</module>
+        <module>roster-service</module>
+        <module>notification-service</module>
+    </modules>
+
+    <properties>
+        <java.version>17</java.version>
+        <spring-cloud.version>2023.0.1</spring-cloud.version>
+        <spring-cloud-kubernetes.version>3.1.0</spring-cloud-kubernetes.version>
+
+        <!-- JWT — chosen for stateless, scalable auth in microservices -->
+        <jjwt.version>0.12.5</jjwt.version>
+
+        <!-- MapStruct for compile-time type-safe DTO<->Entity mapping -->
+        <mapstruct.version>1.5.5.Final</mapstruct.version>
+
+        <!-- Resilience4j for circuit-breaker and retry patterns -->
+        <resilience4j.version>2.2.0</resilience4j.version>
+
+        <!-- Lombok to reduce boilerplate without runtime overhead -->
+        <lombok.version>1.18.30</lombok.version>
+
+        <!-- OpenAPI for auto-generated API documentation -->
+        <springdoc.version>2.3.0</springdoc.version>
+    </properties>
+
+    <!--
+      WHY dependencyManagement vs dependencies:
+      dependencyManagement declares versions WITHOUT adding dependencies.
+      Child modules opt-in explicitly, maintaining modularity.
+    -->
+    <dependencyManagement>
+        <dependencies>
+            <!-- Spring Cloud BOM -->
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- JWT Libraries -->
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-api</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-impl</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
+            </dependency>
+
+            <!-- MapStruct -->
+            <dependency>
+                <groupId>org.mapstruct</groupId>
+                <artifactId>mapstruct</artifactId>
+                <version>${mapstruct.version}</version>
+            </dependency>
+
+            <!-- Resilience4j -->
+            <dependency>
+                <groupId>io.github.resilience4j</groupId>
+                <artifactId>resilience4j-spring-boot3</artifactId>
+                <version>${resilience4j.version}</version>
+            </dependency>
+
+            <!-- OpenAPI Documentation -->
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- Common dependencies inherited by ALL child modules -->
+    <dependencies>
+        <!-- Lombok: compile-time code generation; zero runtime footprint -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Spring Boot Test: JUnit 5 + Mockito + TestContainers support -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!--
+                  WHY maven-compiler-plugin with annotationProcessorPaths:
+                  MapStruct and Lombok both use annotation processing.
+                  Declaring them together in annotationProcessorPaths ensures
+                  Lombok runs BEFORE MapStruct (order matters!) so MapStruct
+                  sees the generated getters/setters from Lombok.
+                -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <configuration>
+                        <source>${java.version}</source>
+                        <target>${java.version}</target>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>${lombok.version}</version>
+                            </path>
+                            <path>
+                                <groupId>org.mapstruct</groupId>
+                                <artifactId>mapstruct-processor</artifactId>
+                                <version>${mapstruct.version}</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+
+                <!-- Spring Boot Maven Plugin for building executable JARs -->
+                <plugin>
+                    <groupId>org.springframework.boot</groupId>
+                    <artifactId>spring-boot-maven-plugin</artifactId>
+                    <configuration>
+                        <excludes>
+                            <exclude>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                            </exclude>
+                        </excludes>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

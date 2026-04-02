@@ -1,0 +1,264 @@
+version: '3.9'
+
+# ============================================================
+# CREW HORIZON - Docker Compose (Local Development)
+# ============================================================
+# WHAT: Local development environment that mirrors the production
+#       Kubernetes setup with all services and dependencies.
+#
+# WHY Docker Compose for local dev (not Minikube/kind):
+#       1. SIMPLICITY: One command (docker compose up) brings
+#          up the entire system — no K8s knowledge needed
+#       2. FAST ITERATION: Source code changes don't require
+#          rebuilding Docker images (volume mounts + spring-devtools)
+#       3. PARITY: Same PostgreSQL, Redis, and service topology
+#          as production — "it works on my machine" is eliminated
+#       4. DEBUGGING: Easy to attach a debugger to any service
+#
+# WHY depends_on with healthcheck conditions:
+#       Services start in dependency order only when their
+#       dependencies are ACTUALLY READY (not just started).
+#       Without this, services fail on startup because the DB
+#       connection isn't ready yet.
+#
+# USAGE:
+#   Start all services:     docker compose up -d
+#   Start specific service: docker compose up -d crew-service
+#   View logs:              docker compose logs -f crew-service
+#   Stop all:               docker compose down
+#   Reset all data:         docker compose down -v
+# ============================================================
+
+# Shared network for all services
+networks:
+  crew-horizon-network:
+    driver: bridge
+
+# Named volumes for data persistence between restarts
+volumes:
+  postgres-data:
+  redis-data:
+
+services:
+
+  # ─── INFRASTRUCTURE ─────────────────────────────────────
+
+  # WHY PostgreSQL 15:
+  # Matches production version. Using same version prevents
+  # "works in dev but fails in prod" due to SQL compatibility issues.
+  postgres:
+    image: postgres:15-alpine
+    container_name: crew-horizon-postgres
+    environment:
+      POSTGRES_USER: crew_horizon_user
+      POSTGRES_PASSWORD: dev_password_changeme
+      # WHY multiple DBs via init script:
+      # Each microservice has its own database (DB-per-service pattern).
+      # This maintains data isolation even in the shared local DB.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-databases.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - crew-horizon-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crew_horizon_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: crew-horizon-redis
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # WHY LRU eviction policy:
+    # When Redis reaches maxmemory, it evicts the LEAST RECENTLY USED
+    # keys. This is ideal for caching — old cache entries are removed
+    # before new ones are rejected.
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - crew-horizon-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ─── MICROSERVICES ───────────────────────────────────────
+
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    container_name: crew-horizon-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      REDIS_HOST: redis
+      JWT_SECRET: "local-dev-jwt-secret-min-32-characters-here"
+      LOG_LEVEL: DEBUG
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - crew-horizon-network
+    # WHY volumes for local dev:
+    # Mount compiled classes so spring-devtools hot-reloads
+    # without full container rebuild on code changes.
+    # Only effective with spring-boot-devtools in classpath.
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: crew-horizon-auth-service
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: "jdbc:postgresql://postgres:5432/auth_db"
+      DB_USERNAME: crew_horizon_user
+      DB_PASSWORD: dev_password_changeme
+      REDIS_HOST: redis
+      JWT_SECRET: "local-dev-jwt-secret-min-32-characters-here"
+      JPA_DDL_AUTO: create-drop  # WHY create-drop in dev: fresh DB each restart
+      JPA_SHOW_SQL: "true"
+      LOG_LEVEL: DEBUG
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - crew-horizon-network
+
+  crew-service:
+    build:
+      context: ./crew-service
+      dockerfile: Dockerfile
+    container_name: crew-horizon-crew-service
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: "jdbc:postgresql://postgres:5432/crew_db"
+      DB_USERNAME: crew_horizon_user
+      DB_PASSWORD: dev_password_changeme
+      REDIS_HOST: redis
+      JWT_SECRET: "local-dev-jwt-secret-min-32-characters-here"
+      JPA_DDL_AUTO: create-drop
+      JPA_SHOW_SQL: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    networks:
+      - crew-horizon-network
+
+  flight-service:
+    build:
+      context: ./flight-service
+      dockerfile: Dockerfile
+    container_name: crew-horizon-flight-service
+    ports:
+      - "8083:8083"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: "jdbc:postgresql://postgres:5432/flight_db"
+      DB_USERNAME: crew_horizon_user
+      DB_PASSWORD: dev_password_changeme
+      REDIS_HOST: redis
+      JWT_SECRET: "local-dev-jwt-secret-min-32-characters-here"
+      JPA_DDL_AUTO: create-drop
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - crew-horizon-network
+
+  roster-service:
+    build:
+      context: ./roster-service
+      dockerfile: Dockerfile
+    container_name: crew-horizon-roster-service
+    ports:
+      - "8084:8084"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: "jdbc:postgresql://postgres:5432/roster_db"
+      DB_USERNAME: crew_horizon_user
+      DB_PASSWORD: dev_password_changeme
+      REDIS_HOST: redis
+      JWT_SECRET: "local-dev-jwt-secret-min-32-characters-here"
+      CREW_SERVICE_URL: "http://crew-service:8082"
+      FLIGHT_SERVICE_URL: "http://flight-service:8083"
+      JPA_DDL_AUTO: create-drop
+    depends_on:
+      postgres:
+        condition: service_healthy
+      crew-service:
+        condition: service_started
+      flight-service:
+        condition: service_started
+    networks:
+      - crew-horizon-network
+
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    container_name: crew-horizon-notification-service
+    ports:
+      - "8085:8085"
+    environment:
+      SPRING_PROFILES_ACTIVE: local
+      DB_URL: "jdbc:postgresql://postgres:5432/notification_db"
+      DB_USERNAME: crew_horizon_user
+      DB_PASSWORD: dev_password_changeme
+      JWT_SECRET: "local-dev-jwt-secret-min-32-characters-here"
+      JPA_DDL_AUTO: create-drop
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - crew-horizon-network
+
+  # ─── OBSERVABILITY STACK ────────────────────────────────
+
+  # WHY Prometheus + Grafana in local dev:
+  # Engineers should be able to see metrics locally to understand
+  # application behavior and validate instrumentation before
+  # pushing to production.
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: crew-horizon-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - crew-horizon-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: crew-horizon-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+    networks:
+      - crew-horizon-network
+    depends_on:
+      - prometheus

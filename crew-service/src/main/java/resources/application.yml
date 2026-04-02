@@ -1,0 +1,104 @@
+# ============================================================
+# CREW SERVICE - Application Configuration
+# ============================================================
+server:
+  port: ${SERVER_PORT:8082}
+
+spring:
+  application:
+    name: crew-service
+
+  cloud:
+    kubernetes:
+      config:
+        enabled: true
+        name: crew-service-config
+        namespace: crew-horizon
+      reload:
+        enabled: true
+        mode: polling
+        period: 60000
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/crew_db}
+    username: ${DB_USERNAME:crew_horizon_user}
+    password: ${DB_PASSWORD:dev_password_changeme}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:15}
+      minimum-idle: 3
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: ${JPA_DDL_AUTO:validate}
+    show-sql: ${JPA_SHOW_SQL:false}
+    properties:
+      hibernate:
+        jdbc.batch_size: 20
+        order_inserts: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 2000ms
+
+  cache:
+    type: redis
+    redis:
+      time-to-live: 600000  # 10 minutes for crew profiles
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+# Crew Profile Cache Config
+# WHY separate TTLs per cache:
+# Crew profiles (rarely change) = 10 min TTL
+# Available crew list (changes with duty status) = 1 min TTL
+# This balances freshness with performance.
+spring.cache:
+  cache-names: crew-members, crew-members-list, available-crew
+
+jwt:
+  secret: ${JWT_SECRET:crew-horizon-jwt-secret-key-minimum-32-characters-required}
+
+# Resilience4j for inter-service calls to roster-service
+resilience4j:
+  circuitbreaker:
+    instances:
+      crew-service:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+  retry:
+    instances:
+      crew-service:
+        maxAttempts: 3
+        waitDuration: 500ms
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: crew-service
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+
+logging:
+  level:
+    com.crewhorizon.crewservice: ${LOG_LEVEL:INFO}
+    org.springframework.security: WARN
+  pattern:
+    console: '{"timestamp":"%d{ISO8601}","level":"%p","service":"crew-service","logger":"%logger{36}","message":"%m"}%n'

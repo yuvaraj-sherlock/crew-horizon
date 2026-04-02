@@ -1,0 +1,265 @@
+---
+# ============================================================
+# API GATEWAY - Kubernetes Deployment
+# ============================================================
+# WHAT: Deploys the API Gateway microservice as a Kubernetes
+#       workload with production-grade configuration.
+#
+# WHY Deployment (not StatefulSet):
+#       API Gateway is STATELESS — any pod can handle any request.
+#       Deployments are for stateless apps; StatefulSets are for
+#       stateful apps (databases). Stateless pods can be:
+#       - Scaled up/down without coordination
+#       - Replaced freely during rolling updates
+#       - Scheduled on any available node
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway
+  namespace: crew-horizon
+  labels:
+    app: api-gateway
+    version: "1.0.0"
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: crew-horizon
+    app.kubernetes.io/component: gateway
+spec:
+  # WHY replicas=2 minimum:
+  # Single replica = single point of failure.
+  # 2 replicas ensures availability during:
+  # - Rolling updates (one pod at a time updated)
+  # - Node failures (other pod still serves traffic)
+  # For production airline systems, consider replicas=3+
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api-gateway
+
+  # WHY RollingUpdate strategy:
+  # Zero-downtime deployments. K8s creates new pods with the new
+  # image, waits for them to be ready, then terminates old pods.
+  # maxSurge=1: Allow 1 extra pod during update
+  # maxUnavailable=0: Never have fewer than desired replicas (zero downtime)
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  template:
+    metadata:
+      labels:
+        app: api-gateway
+        version: "1.0.0"
+      # WHY Prometheus scrape annotations:
+      # Prometheus uses these to auto-discover pods to scrape
+      # metrics from. The /actuator/prometheus endpoint exposes
+      # JVM, HTTP, and custom application metrics.
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      serviceAccountName: crew-horizon-sa
+
+      # WHY topologySpreadConstraints:
+      # Ensures pods spread across multiple nodes/zones.
+      # Without this, K8s might schedule both replicas on the
+      # same node — defeating the purpose of multiple replicas.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api-gateway
+
+      containers:
+        - name: api-gateway
+          # WHY specific SHA digest (not just :latest or :1.0.0):
+          # Image tags are mutable — :1.0.0 can be overwritten.
+          # SHA digest is IMMUTABLE — guarantees exact binary deployed.
+          # GitHub Actions CI/CD pipeline updates this digest automatically.
+          image: ghcr.io/your-org/crew-horizon/api-gateway:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+
+          # WHY environment from configMapRef + secretRef:
+          # All non-sensitive config from ConfigMap,
+          # sensitive values from Secret. Clear separation of concerns.
+          envFrom:
+            - configMapRef:
+                name: api-gateway-config
+            - secretRef:
+                name: crew-horizon-secrets
+
+          # WHY resource requests AND limits:
+          # requests: Guaranteed resources (K8s won't schedule on a node
+          #           that can't provide this)
+          # limits: Maximum resources (prevents a runaway pod from consuming
+          #         all node resources — the "noisy neighbor" problem)
+          #
+          # WHY memory limit > request:
+          # JVM applications have variable memory usage.
+          # Setting limit = request would cause OOMKill on JVM GC spikes.
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"        # 0.25 CPU cores guaranteed
+            limits:
+              memory: "512Mi"
+              cpu: "500m"        # Max 0.5 CPU cores
+
+          # WHY livenessProbe:
+          # K8s restarts the pod if liveness fails.
+          # Use for detecting DEADLOCKED or stuck pods (not just startup).
+          # initialDelaySeconds=60: Give JVM time to start up before probing.
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            failureThreshold: 3
+            timeoutSeconds: 10
+
+          # WHY readinessProbe (separate from liveness):
+          # K8s removes the pod from Service endpoints if readiness fails.
+          # Use for detecting when pod is TEMPORARILY unable to serve traffic
+          # (e.g., downstream dependency not ready, cache warming).
+          # A failing readiness probe does NOT restart the pod.
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          # WHY startupProbe:
+          # Protects slow-starting pods from liveness probe failures
+          # during initialization. Without startupProbe, a slow JVM
+          # startup (30s+) would be killed by liveness probe.
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            failureThreshold: 30    # Allow up to 5 minutes to start
+            periodSeconds: 10
+
+          # WHY lifecycle preStop sleep:
+          # When K8s sends SIGTERM to terminate a pod, it simultaneously
+          # removes it from the Service endpoints. BUT the load balancer
+          # might still send requests for a few seconds before it learns
+          # about the removal. A 15s sleep prevents request failures
+          # during graceful shutdown.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"]
+
+          # WHY JAVA_OPTS tuning:
+          # -XX:+UseContainerSupport: Respect container memory limits (not host)
+          # -Xss512k: Reduce stack size (default 512k-1MB) for more threads
+          # -XX:MaxRAMPercentage=75: Use 75% of container limit for JVM heap
+          env:
+            - name: JAVA_OPTS
+              value: >-
+                -XX:+UseContainerSupport
+                -XX:MaxRAMPercentage=75.0
+                -XX:+UseG1GC
+                -XX:+ExitOnOutOfMemoryError
+                -Djava.security.egd=file:/dev/./urandom
+
+---
+# ============================================================
+# API GATEWAY - Kubernetes Service (ClusterIP)
+# ============================================================
+# WHAT: Exposes the API Gateway pods as a stable network endpoint
+#       within the cluster.
+#
+# WHY ClusterIP for internal service (not NodePort/LoadBalancer):
+#       The API Gateway is exposed externally via Ingress.
+#       ClusterIP gives it a stable DNS name
+#       (api-gateway.crew-horizon.svc.cluster.local)
+#       for internal cluster communication.
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-gateway
+  namespace: crew-horizon
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: crew-horizon
+spec:
+  selector:
+    app: api-gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+
+---
+# ============================================================
+# API GATEWAY - Horizontal Pod Autoscaler
+# ============================================================
+# WHAT: Automatically scales the gateway pod count based on
+#       CPU and memory utilization.
+#
+# WHY HPA:
+#       Airline systems have HIGHLY variable traffic:
+#       - Peak: Crew check-in windows (06:00-08:00 local)
+#       - Off-peak: Midnight
+#       Static replica count wastes resources off-peak
+#       and fails to handle spikes at peak.
+#       HPA automatically scales replicas between min and max
+#       based on actual load.
+# ============================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-gateway-hpa
+  namespace: crew-horizon
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    # Scale out when CPU > 70%
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    # Scale out when memory > 80%
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60    # Wait 60s before scaling up again
+      policies:
+        - type: Pods
+          value: 2                       # Add max 2 pods at a time
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300   # Wait 5 min before scaling down
+      policies:
+        - type: Pods
+          value: 1                       # Remove max 1 pod at a time
+          periodSeconds: 60

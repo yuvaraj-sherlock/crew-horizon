@@ -1,0 +1,168 @@
+# ============================================================
+# API GATEWAY - Application Configuration
+# ============================================================
+# WHY YAML over Properties:
+#   YAML supports hierarchical structure which maps naturally
+#   to Spring Boot's nested configuration model. Much more
+#   readable than flat key=value for complex gateway configs.
+#
+# WHY environment variable overrides (${ENV_VAR:default}):
+#   Enables the same Docker image to run in dev/staging/prod
+#   by injecting different values as K8s ConfigMap/Secret env vars.
+#   This is the 12-Factor App methodology (Factor III: Config).
+# ============================================================
+
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: api-gateway
+
+  # WHY Spring Cloud Kubernetes Config:
+  # Instead of Spring Cloud Config Server (requires a separate
+  # service to run), Spring Cloud Kubernetes reads configuration
+  # directly from Kubernetes ConfigMaps. This eliminates one
+  # more service to manage and is the cloud-native approach.
+  cloud:
+    kubernetes:
+      config:
+        enabled: true
+        name: api-gateway-config
+        namespace: crew-horizon
+      reload:
+        enabled: true
+        mode: polling
+        period: 30000  # Reload config every 30s from ConfigMap
+
+    gateway:
+      # WHY globalcors at gateway level:
+      # Handling CORS at the gateway prevents duplicate CORS
+      # config across all microservices. Centralized policy.
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowed-origins:
+              - "https://crew-horizon.com"
+              - "https://app.crew-horizon.com"
+              - "${CORS_ALLOWED_ORIGINS:http://localhost:3000}"
+            allowed-methods: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
+            allowed-headers: ["Authorization", "Content-Type", "X-Request-Id"]
+            exposed-headers: ["X-Request-Id", "X-Rate-Limit-Remaining"]
+            allow-credentials: true
+            max-age: 3600
+
+      # Default filters applied to ALL routes
+      default-filters:
+        - AddRequestHeader=X-Gateway-Version, 1.0.0
+        - DedupeResponseHeader=Access-Control-Allow-Credentials Access-Control-Allow-Origin
+
+      # WHY discovery locator disabled:
+      # We define routes explicitly in GatewayRouteConfig.java
+      # for clarity and control. Auto-discovery would expose ALL
+      # services automatically which is a security risk.
+      discovery:
+        locator:
+          enabled: false
+
+  # Redis for distributed rate limiting
+  data:
+    redis:
+      host: ${REDIS_HOST:redis-service}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 10
+          max-idle: 5
+          min-idle: 1
+
+# JWT Configuration
+# WHY externalized secret:
+# JWT signing key is a credential. It must NEVER be in source
+# control. In Kubernetes, this is stored in a K8s Secret and
+# mounted as an environment variable.
+jwt:
+  secret: ${JWT_SECRET:crew-horizon-jwt-secret-key-min-32-chars-required}
+
+# ============================================================
+# Resilience4j Circuit Breaker Configuration
+# ============================================================
+# WHY these specific thresholds:
+# - slidingWindowSize=10: Evaluate last 10 requests (small
+#   enough to detect failures quickly)
+# - failureRateThreshold=50: Open circuit if >50% fail
+# - waitDurationInOpenState=10s: Give service 10s to recover
+# - permittedCallsInHalfOpenState=3: Test 3 calls before
+#   fully closing (gradual recovery)
+resilience4j:
+  circuitbreaker:
+    instances:
+      auth-service-cb:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedCallsInHalfOpenState: 3
+        registerHealthIndicator: true
+      crew-service-cb:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedCallsInHalfOpenState: 3
+      flight-service-cb:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 15s
+        permittedCallsInHalfOpenState: 5
+      roster-service-cb:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 10s
+        permittedCallsInHalfOpenState: 3
+      notification-service-cb:
+        slidingWindowSize: 5
+        failureRateThreshold: 60
+        waitDurationInOpenState: 30s
+        permittedCallsInHalfOpenState: 2
+
+# ============================================================
+# Spring Boot Actuator
+# ============================================================
+# WHY expose specific endpoints only:
+# Security principle of least exposure. Health endpoints are
+# needed for Kubernetes probes; info and metrics for monitoring.
+# Shutdown endpoint is deliberately EXCLUDED (security risk).
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics, prometheus, gateway
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always  # Needed for K8s readiness probes to see component status
+      probes:
+        enabled: true  # Exposes /actuator/health/liveness and /actuator/health/readiness
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: api-gateway
+      environment: ${ENVIRONMENT:production}
+
+# ============================================================
+# Structured Logging Configuration
+# ============================================================
+# WHY JSON logging format:
+# JSON logs are directly parseable by log aggregators
+# (Logstash, Fluentd) and searchable in Kibana/Grafana Loki
+# without additional parsing rules.
+logging:
+  level:
+    com.crewhorizon: ${LOG_LEVEL:INFO}
+    org.springframework.cloud.gateway: ${GATEWAY_LOG_LEVEL:INFO}
+    reactor.netty: WARN
+  pattern:
+    console: '{"timestamp":"%d{ISO8601}","level":"%p","service":"api-gateway","logger":"%logger{36}","message":"%m","traceId":"%X{traceId}","spanId":"%X{spanId}"}%n'

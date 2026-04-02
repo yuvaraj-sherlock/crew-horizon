@@ -1,0 +1,145 @@
+---
+# ============================================================
+# CREW HORIZON - Application ConfigMaps
+# ============================================================
+# WHAT: Kubernetes ConfigMaps store non-sensitive configuration
+#       for each microservice.
+#
+# WHY ConfigMaps (not hardcoded in application.yml):
+#       The 12-Factor App methodology (Factor III: Config) mandates
+#       that config is separated from code. ConfigMaps enable:
+#       1. Same Docker image deployed in dev/staging/prod with
+#          different configs (no rebuild needed per environment)
+#       2. Config changes without pod restarts (with Spring
+#          Cloud Kubernetes hot-reload)
+#       3. Centralized visibility of all service configurations
+#          via kubectl get configmaps
+#
+# WHY NOT Secrets for these values:
+#       Passwords, API keys, and JWT secrets go in K8s Secrets
+#       (see secrets.yaml). ConfigMaps are for non-sensitive
+#       configuration only. Never put credentials in ConfigMaps —
+#       they're stored unencrypted in etcd by default.
+# ============================================================
+
+# API Gateway ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-gateway-config
+  namespace: crew-horizon
+  labels:
+    app: api-gateway
+    app.kubernetes.io/part-of: crew-horizon
+data:
+  # Spring Cloud Kubernetes reads these as property overrides
+  SERVER_PORT: "8080"
+  LOG_LEVEL: "INFO"
+  GATEWAY_LOG_LEVEL: "WARN"
+  ENVIRONMENT: "production"
+  CORS_ALLOWED_ORIGINS: "https://crew-horizon.com,https://app.crew-horizon.com"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+
+---
+# Auth Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-service-config
+  namespace: crew-horizon
+  labels:
+    app: auth-service
+    app.kubernetes.io/part-of: crew-horizon
+data:
+  SERVER_PORT: "8081"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/auth_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "10"
+  DB_POOL_MIN: "2"
+  JPA_DDL_AUTO: "validate"
+  JPA_SHOW_SQL: "false"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  LOG_LEVEL: "INFO"
+  SECURITY_LOG_LEVEL: "WARN"
+  ENVIRONMENT: "production"
+  JWT_ACCESS_EXPIRY_MS: "900000"       # 15 minutes
+  JWT_REFRESH_EXPIRY_MS: "604800000"   # 7 days
+
+---
+# Crew Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crew-service-config
+  namespace: crew-horizon
+  labels:
+    app: crew-service
+    app.kubernetes.io/part-of: crew-horizon
+data:
+  SERVER_PORT: "8082"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/crew_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "15"
+  REDIS_HOST: "redis-service"
+  REDIS_PORT: "6379"
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "INFO"
+
+---
+# Flight Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flight-service-config
+  namespace: crew-horizon
+  labels:
+    app: flight-service
+    app.kubernetes.io/part-of: crew-horizon
+data:
+  SERVER_PORT: "8083"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/flight_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "15"
+  REDIS_HOST: "redis-service"
+  ENVIRONMENT: "production"
+
+---
+# Roster Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: roster-service-config
+  namespace: crew-horizon
+  labels:
+    app: roster-service
+    app.kubernetes.io/part-of: crew-horizon
+data:
+  SERVER_PORT: "8084"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/roster_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "20"  # Higher pool — roster service does more DB work
+  REDIS_HOST: "redis-service"
+  ENVIRONMENT: "production"
+  # Service discovery URLs (K8s DNS-based)
+  CREW_SERVICE_URL: "lb://crew-service"
+  FLIGHT_SERVICE_URL: "lb://flight-service"
+
+---
+# Notification Service ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notification-service-config
+  namespace: crew-horizon
+  labels:
+    app: notification-service
+    app.kubernetes.io/part-of: crew-horizon
+data:
+  SERVER_PORT: "8085"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/notification_db"
+  DB_USERNAME: "crew_horizon_user"
+  ENVIRONMENT: "production"
+  SMTP_HOST: "smtp.company.com"
+  SMTP_PORT: "587"

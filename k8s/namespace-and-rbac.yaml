@@ -1,0 +1,96 @@
+---
+# ============================================================
+# CREW HORIZON - Kubernetes Namespace
+# ============================================================
+# WHAT: Defines an isolated namespace for all CREW Horizon resources.
+#
+# WHY dedicated namespace:
+# Kubernetes namespaces provide:
+# 1. RESOURCE ISOLATION: Crew Horizon pods are separate from
+#    other applications on the same cluster
+# 2. RBAC SCOPE: Roles and bindings can be namespace-scoped
+# 3. NETWORK POLICIES: Can apply ingress/egress rules per namespace
+# 4. RESOURCE QUOTAS: Limit total CPU/memory for the entire
+#    Crew Horizon application as a unit
+# 5. COST ALLOCATION: Namespace-based resource tracking for
+#    chargeback in enterprise environments
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crew-horizon
+  labels:
+    name: crew-horizon
+    app.kubernetes.io/managed-by: kubectl
+    environment: production
+
+---
+# ============================================================
+# Service Account for Spring Cloud Kubernetes
+# ============================================================
+# WHAT: A dedicated Kubernetes service account for all
+#       CREW Horizon microservice pods.
+#
+# WHY dedicated service account (not default):
+# Spring Cloud Kubernetes needs to LIST/WATCH ConfigMaps and
+# Secrets to implement configuration management without a
+# separate Config Server. Using the 'default' service account
+# is a security anti-pattern — it might have overly broad
+# permissions from other workloads.
+# A dedicated service account with minimal permissions follows
+# the principle of least privilege.
+# ============================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crew-horizon-sa
+  namespace: crew-horizon
+  labels:
+    app.kubernetes.io/part-of: crew-horizon
+
+---
+# ============================================================
+# ClusterRole for Spring Cloud Kubernetes Config Reading
+# ============================================================
+# WHAT: Grants permission to read ConfigMaps and Secrets.
+#
+# WHY these specific verbs (get, list, watch):
+# - get: Read a specific ConfigMap by name
+# - list: List all ConfigMaps (needed for Spring Cloud K8s discovery)
+# - watch: Subscribe to changes (enables hot-reload of config)
+#
+# WHY NOT ClusterAdmin role:
+# Least privilege principle. Apps need only read configuration —
+# they should NEVER be able to modify K8s resources.
+# ============================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: crew-horizon-role
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ============================================================
+# ClusterRoleBinding - Bind role to service account
+# ============================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: crew-horizon-rolebinding
+subjects:
+  - kind: ServiceAccount
+    name: crew-horizon-sa
+    namespace: crew-horizon
+roleRef:
+  kind: ClusterRole
+  name: crew-horizon-role
+  apiGroup: rbac.authorization.k8s.io
