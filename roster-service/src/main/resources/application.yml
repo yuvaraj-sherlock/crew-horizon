@@ -1,0 +1,99 @@
+server:
+  port: ${SERVER_PORT:8084} # Default to 8084 if SERVER_PORT env var is not set
+
+spring:
+  application:
+    name: roster-service
+  profiles:
+    active: ${ENVIRONMENT:production} # Default to production if ENVIRONMENT env var is not set
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/roster_db}
+    username: ${DB_USERNAME:crew_horizon_user}
+    password: ${DB_PASSWORD:password} # Placeholder, should be from K8s Secret
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX:20}
+      minimum-idle: 2
+      idle-timeout: 30000
+      pool-name: RosterServiceHikariCP
+  jpa:
+    hibernate:
+      ddl-auto: validate # Use 'update' for development, 'validate' for production
+    show-sql: false
+    properties:
+      hibernate.format_sql: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  cache:
+    type: redis
+  webflux:
+    base-path: /api/roster-service # Optional: if you want a base path for all endpoints
+
+# Inter-service communication URLs
+services:
+  crew-service:
+    url: ${CREW_SERVICE_URL:lb://crew-service}
+    retry-queue: crew-status-retry-queue
+  flight-service:
+    url: ${FLIGHT_SERVICE_URL:lb://flight-service}
+
+# Resilience4j configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      crew-service:
+        registerHealthIndicator: true
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 5s
+        permittedNumberOfCallsInHalfOpenState: 3
+        eventConsumerBufferSize: 10
+      flight-service:
+        registerHealthIndicator: true
+        slidingWindowType: COUNT_BASED
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 5s
+        permittedNumberOfCallsInHalfOpenState: 3
+        eventConsumerBufferSize: 10
+  retry:
+    instances:
+      crew-service:
+        maxAttempts: 3
+        waitDuration: 2s
+      flight-service:
+        maxAttempts: 3
+        waitDuration: 2s
+  timelimiter:
+    instances:
+      crew-service:
+        timeoutDuration: 2s
+      flight-service:
+        timeoutDuration: 2s
+
+# Actuator endpoints
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics,circuitbreakers,caches
+  metrics:
+    tags:
+      application: roster-service
+
+# OpenAPI (Swagger) configuration
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+  api-docs:
+    path: /v3/api-docs
+
+logging:
+  level:
+    root: ${LOG_LEVEL:INFO}
+    com.crewhorizon.rosterservice: DEBUG # Adjust as needed for service-specific logging
+    org.springframework.web.reactive.function.client: WARN # Reduce noisy WebClient logs
+    io.github.resilience4j: INFO
