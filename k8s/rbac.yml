@@ -1,0 +1,55 @@
+# ============================================================
+# RBAC for Spring Cloud Kubernetes
+# ============================================================
+# WHAT: Grants the CREW Horizon services permission to read
+#       Kubernetes ConfigMaps and Secrets for configuration.
+#
+# WHY ServiceAccount + ClusterRole + RoleBinding:
+#   Spring Cloud Kubernetes reads configuration from K8s ConfigMaps
+#   at startup and during config reload. Without these RBAC rules,
+#   the services would be FORBIDDEN from reading their own ConfigMaps.
+#
+# WHY a dedicated ServiceAccount (not default):
+#   The 'default' service account has broad permissions across
+#   namespaces. A dedicated ServiceAccount follows the principle
+#   of least privilege — only the permissions required, nothing more.
+#
+# WHY 'get', 'list', 'watch' on configmaps and secrets:
+#   - get: Read a specific ConfigMap by name
+#   - list: List all ConfigMaps (needed for discovery)
+#   - watch: Watch for ConfigMap changes (enables live config reload)
+# ============================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: crew-horizon-sa
+  namespace: crew-horizon
+  labels:
+    app.kubernetes.io/part-of: crew-horizon
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: crew-horizon-config-reader
+  namespace: crew-horizon
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "endpoints", "services"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: crew-horizon-config-reader-binding
+  namespace: crew-horizon
+subjects:
+  - kind: ServiceAccount
+    name: crew-horizon-sa
+    namespace: crew-horizon
+roleRef:
+  kind: Role
+  name: crew-horizon-config-reader
+  apiGroup: rbac.authorization.k8s.io

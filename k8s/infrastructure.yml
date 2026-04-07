@@ -1,0 +1,331 @@
+# ============================================================
+# Kubernetes Ingress — API Gateway Entry Point
+# ============================================================
+# WHAT: Exposes the API Gateway to external traffic via
+#       an NGINX Ingress Controller with TLS termination.
+#
+# WHY Ingress (not LoadBalancer Service per microservice):
+#   One LoadBalancer Service = one cloud load balancer = one IP.
+#   For 6 microservices, that's 6 cloud load balancers = expensive.
+#   A single Ingress with one cloud LB routes ALL traffic to the
+#   API Gateway, which then routes internally via ClusterIP Services.
+#   Cost: 1 LB instead of 6. Security: single TLS termination point.
+#
+# WHY TLS at Ingress (not at the API Gateway):
+#   TLS termination at the Ingress offloads SSL computation from
+#   the application pods. Internal cluster traffic (post-ingress)
+#   is unencrypted but protected by Kubernetes Network Policies.
+#   For higher security (zero-trust), mTLS via a service mesh
+#   (Istio, Linkerd) would encrypt intra-cluster traffic too.
+#
+# WHY cert-manager annotations:
+#   cert-manager automatically provisions and renews Let's Encrypt
+#   TLS certificates. Manual certificate management at scale is
+#   error-prone and operationally expensive.
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: crew-horizon-ingress
+  namespace: crew-horizon
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+
+    # WHY rate limiting at Ingress level:
+    # First line of defense against DDoS before traffic reaches
+    # the API Gateway. The gateway has its own Redis-based rate
+    # limiting — this is an additional layer at the K8s edge.
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    nginx.ingress.kubernetes.io/limit-connections: "50"
+
+    # WHY proxy body size limit:
+    # Prevents very large payloads from exhausting memory in the
+    # API Gateway. Crew data payloads are small; 10MB is generous.
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+
+    # WHY proxy timeouts:
+    # Roster computation can take up to 30s for large assignments.
+    # Default nginx timeout is 60s — sufficient but explicit.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+
+    # Security headers
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      add_header X-Frame-Options "DENY";
+      add_header X-Content-Type-Options "nosniff";
+      add_header X-XSS-Protection "1; mode=block";
+      add_header Referrer-Policy "strict-origin-when-cross-origin";
+      add_header Content-Security-Policy "default-src 'self'";
+spec:
+  tls:
+    - hosts:
+        - api.crew-horizon.com
+      secretName: crew-horizon-tls
+  rules:
+    - host: api.crew-horizon.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+---
+# ============================================================
+# Redis Deployment + Service
+# ============================================================
+# WHAT: In-memory data store for:
+#       - API Gateway rate limiting (distributed counters)
+#       - JWT token blacklist (auth-service)
+#       - Crew profile caching (crew-service)
+#
+# WHY a single Redis instance (not Redis Cluster):
+#   For phase 1, a single Redis with persistence is sufficient.
+#   Redis Cluster (sharding) adds complexity and is only needed
+#   when a single instance's memory/throughput is saturated.
+#   Migration path: Redis → Redis Sentinel (HA) → Redis Cluster.
+#
+# WHY PersistentVolumeClaim for Redis:
+#   Redis AOF (Append Only File) persistence ensures the blacklist
+#   and rate limit data survives pod restarts. Without persistence,
+#   a Redis restart would clear the token blacklist — logging out
+#   all users is acceptable but rate limit history would reset
+#   (potential security window).
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: crew-horizon
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: crew-horizon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      serviceAccountName: crew-horizon-sa
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          ports:
+            - containerPort: 6379
+          command:
+            - redis-server
+            - --appendonly
+            - "yes"              # Enable AOF persistence
+            - --requirepass
+            - $(REDIS_PASSWORD)  # Auth from K8s Secret
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: crew-horizon-secrets
+                  key: REDIS_PASSWORD
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "200m"
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          persistentVolumeClaim:
+            claimName: redis-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: crew-horizon
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: crew-horizon
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+      targetPort: 6379
+---
+# ============================================================
+# PostgreSQL Deployment + Service
+# ============================================================
+# WHAT: Relational database for all microservices.
+#       Each service has its own database (logical separation).
+#
+# WHY single PostgreSQL instance with multiple databases:
+#   For a production platform at scale, each microservice should
+#   ideally have its own database SERVER for full isolation.
+#   However, for deployment simplicity in phase 1, a single
+#   PostgreSQL pod with separate databases (auth_db, crew_db,
+#   flight_db, roster_db, notification_db) provides:
+#   - Logical isolation (no cross-service queries)
+#   - Operational simplicity (one server to manage)
+#   - Easy migration to separate servers when needed
+#
+# PRODUCTION RECOMMENDATION: Use a managed PostgreSQL service
+# (AWS RDS, Google Cloud SQL, Azure Database for PostgreSQL)
+# instead of self-managed in-cluster PostgreSQL. Managed services
+# provide automated backups, HA, and patching.
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: crew-horizon
+  labels:
+    app: postgres
+    app.kubernetes.io/part-of: crew-horizon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      serviceAccountName: crew-horizon-sa
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_USER
+              value: postgres
+            # WHY init script via POSTGRES_DB:
+            # postgres entrypoint.sh creates this DB automatically.
+            # Additional DBs are created via initdb scripts.
+            - name: POSTGRES_DB
+              value: postgres
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: postgres-init
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: postgres-data
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+        - name: postgres-init
+          configMap:
+            name: postgres-init-scripts
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+  namespace: crew-horizon
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: crew-horizon
+spec:
+  type: ClusterIP
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+      targetPort: 5432
+---
+# ============================================================
+# PostgreSQL Init Scripts ConfigMap
+# ============================================================
+# WHY: Creates separate databases for each microservice on
+# first initialization. The postgres Docker entrypoint
+# automatically runs scripts in /docker-entrypoint-initdb.d/
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+  namespace: crew-horizon
+data:
+  01-create-databases.sql: |
+    -- Create databases for each microservice
+    -- WHY separate DBs: Each microservice owns its data completely.
+    -- No cross-service DB joins possible — enforces loose coupling.
+    CREATE DATABASE auth_db;
+    CREATE DATABASE crew_db;
+    CREATE DATABASE flight_db;
+    CREATE DATABASE roster_db;
+    CREATE DATABASE notification_db;
+
+    -- Create application user with limited permissions
+    -- WHY not use superuser: Principle of least privilege.
+    -- The app user can only access its own database, not postgres system tables.
+    CREATE USER crew_horizon_user WITH ENCRYPTED PASSWORD 'changeme';
+    GRANT ALL PRIVILEGES ON DATABASE auth_db TO crew_horizon_user;
+    GRANT ALL PRIVILEGES ON DATABASE crew_db TO crew_horizon_user;
+    GRANT ALL PRIVILEGES ON DATABASE flight_db TO crew_horizon_user;
+    GRANT ALL PRIVILEGES ON DATABASE roster_db TO crew_horizon_user;
+    GRANT ALL PRIVILEGES ON DATABASE notification_db TO crew_horizon_user;

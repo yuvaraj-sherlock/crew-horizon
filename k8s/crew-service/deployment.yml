@@ -1,0 +1,288 @@
+# ============================================================
+# Kubernetes Deployment + Service — crew-service
+# ============================================================
+# WHAT: Defines how crew-service pods are deployed and exposed
+#       within the crew-horizon namespace.
+#
+# WHY these specific K8s settings:
+#
+# replicas: 2 — High Availability baseline.
+#   At least 2 replicas ensures zero-downtime rolling updates
+#   and survival of a single node failure.
+#
+# strategy: RollingUpdate with maxSurge=1, maxUnavailable=0
+#   Brings up a new pod BEFORE taking down the old one.
+#   Ensures 100% capacity during deployments (zero downtime).
+#
+# resources: requests and limits
+#   - requests: Minimum guaranteed resources (used for K8s scheduling)
+#   - limits: Maximum allowed (prevents one pod starving others)
+#   WHY both: Without requests, K8s schedules pods suboptimally.
+#   Without limits, a memory leak in one pod evicts neighbors.
+#
+# livenessProbe: Restarts pod if it hangs/deadlocks.
+# readinessProbe: Removes pod from load balancer if it's not ready.
+#   WHY different thresholds: Liveness is triggered rarely (only on
+#   actual hangs). Readiness is triggered on startup and temporary
+#   unavailability (e.g., DB reconnect). Different thresholds prevent
+#   restart loops during normal transient slowdowns.
+#
+# topologySpreadConstraints: Spreads pods across availability zones.
+#   WHY: Single-AZ outages are common. Spreading ensures the service
+#   survives a complete AZ loss with remaining pods handling traffic.
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crew-service
+  namespace: crew-horizon
+  labels:
+    app: crew-service
+    app.kubernetes.io/name: crew-service
+    app.kubernetes.io/part-of: crew-horizon
+    app.kubernetes.io/version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: crew-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0  # Zero-downtime deployments
+  template:
+    metadata:
+      labels:
+        app: crew-service
+        app.kubernetes.io/name: crew-service
+        app.kubernetes.io/version: "1.0.0"
+      annotations:
+        # WHY prometheus.io annotations:
+        # Prometheus auto-discovers pods with these annotations and
+        # scrapes metrics from /actuator/prometheus automatically.
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/actuator/prometheus"
+        prometheus.io/port: "8082"
+    spec:
+      serviceAccountName: crew-horizon-sa
+
+      # WHY affinity/topologySpreadConstraints:
+      # Prevents all replicas from landing on the same node/AZ.
+      # A single node failure would otherwise take down the service.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: crew-service
+
+      # WHY terminationGracePeriodSeconds: 60:
+      # Spring Boot takes ~30s to drain in-flight requests on shutdown
+      # (via /actuator/health readiness probe going DOWN first).
+      # 60s grace period allows clean shutdown before SIGKILL.
+      terminationGracePeriodSeconds: 60
+
+      containers:
+        - name: crew-service
+          image: crew-horizon/crew-service:1.0.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8082
+              name: http
+              protocol: TCP
+
+          # WHY envFrom ConfigMap + Secret separately:
+          # ConfigMaps and Secrets are different K8s resources with
+          # different access controls. Separating them allows
+          # granting read access to ConfigMap without Secret access.
+          envFrom:
+            - configMapRef:
+                name: crew-service-config
+            - secretRef:
+                name: crew-horizon-secrets
+
+          env:
+            # Downward API: inject pod name for distributed tracing
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: REDIS_PORT
+              value: "6379"
+
+          resources:
+            requests:
+              memory: 512Mi
+              cpu: 250m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+
+          # WHY startupProbe:
+          # Spring Boot with JPA/Flyway can take 45–90s to start.
+          # A startup probe prevents liveness from killing the pod
+          # during the slow initialization phase.
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8082
+            failureThreshold: 30      # 30 * 10s = 5 minutes max startup
+            periodSeconds: 10
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8082
+            initialDelaySeconds: 0   # startupProbe handles initial delay
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8082
+            initialDelaySeconds: 0
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          # WHY lifecycle preStop hook:
+          # Kubernetes sends SIGTERM and immediately removes the pod
+          # from the Service endpoints. New requests stop, but in-flight
+          # requests are mid-processing. The preStop sleep gives the
+          # load balancer time to stop routing new traffic before
+          # the JVM begins shutdown.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+
+          # WHY readOnly root filesystem:
+          # Security hardening — prevents malware from writing to
+          # the container filesystem. Spring Boot only needs to
+          # write to /tmp (for temp files).
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+      # WHY imagePullSecrets:
+      # Private container registry requires authentication.
+      # K8s needs credentials to pull images.
+      imagePullSecrets:
+        - name: registry-credentials
+---
+# ============================================================
+# Kubernetes Service — crew-service
+# ============================================================
+# WHAT: Exposes the crew-service deployment as a stable network endpoint.
+#
+# WHY ClusterIP (not NodePort or LoadBalancer):
+#   ClusterIP exposes the service ONLY within the cluster.
+#   External traffic is handled by the API Gateway + Ingress.
+#   No service except the api-gateway should be exposed externally
+#   — this is the "single entry point" security pattern.
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: crew-service
+  namespace: crew-horizon
+  labels:
+    app: crew-service
+    app.kubernetes.io/part-of: crew-horizon
+  annotations:
+    # Prometheus service discovery
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8082"
+spec:
+  type: ClusterIP
+  selector:
+    app: crew-service
+  ports:
+    - name: http
+      port: 8082
+      targetPort: 8082
+      protocol: TCP
+---
+# ============================================================
+# Horizontal Pod Autoscaler (HPA) — crew-service
+# ============================================================
+# WHAT: Automatically scales pod count based on CPU/memory load.
+#
+# WHY HPA in an airline system:
+#   Flight operations have predictable peak loads:
+#   - Boarding time (check-in flood): crew queries spike 10x
+#   - Schedule publication (annual): roster queries spike
+#   HPA scales out automatically during these peaks and scales
+#   back in to save cost during quiet periods.
+#
+# WHY CPU threshold 70% (not 80% or 50%):
+#   70% leaves headroom for traffic spikes while ensuring
+#   scale-out happens before the service becomes overloaded.
+#   New pods take ~60s to become ready — triggering too late
+#   causes request queuing. 70% is the industry standard threshold.
+# ============================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: crew-service-hpa
+  namespace: crew-horizon
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: crew-service
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      # WHY fast scale-up: Respond quickly to traffic spikes
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      # WHY slow scale-down: Prevents thrashing (rapid scale up/down)
+      # Premature scale-down during lull in a peak period causes
+      # another scale-up event immediately.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

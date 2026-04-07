@@ -1,0 +1,103 @@
+# ============================================================
+# Kubernetes ConfigMaps — Per-Service Configuration
+# ============================================================
+# WHAT: Stores non-sensitive configuration for each microservice.
+#
+# WHY ConfigMaps (not hardcoded application.yml in the image):
+#   1. ENVIRONMENT PARITY: Same Docker image runs in dev/staging/prod
+#      with different ConfigMaps per environment.
+#   2. LIVE RELOAD: Spring Cloud Kubernetes watches ConfigMaps.
+#      Config changes take effect WITHOUT pod restart (within 30–60s).
+#   3. GITOPS FRIENDLY: ConfigMaps are declarative YAML, versioned
+#      in Git, applied via kubectl/Flux/ArgoCD.
+#   4. SEPARATION: Config changes (log level, feature flags) don't
+#      require rebuilding and redeploying the Docker image.
+#
+# SECURITY NOTE: ConfigMaps store NON-SENSITIVE data only.
+# Secrets (DB passwords, JWT keys) are in separate K8s Secrets.
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-gateway-config
+  namespace: crew-horizon
+data:
+  SERVER_PORT: "8080"
+  LOG_LEVEL: "INFO"
+  GATEWAY_LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+  CORS_ALLOWED_ORIGINS: "https://crew-horizon.com,https://app.crew-horizon.com"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: auth-service-config
+  namespace: crew-horizon
+data:
+  SERVER_PORT: "8081"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/auth_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "10"
+  JPA_DDL_AUTO: "validate"
+  JPA_SHOW_SQL: "false"
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: crew-service-config
+  namespace: crew-horizon
+data:
+  SERVER_PORT: "8082"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/crew_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "15"
+  JPA_DDL_AUTO: "validate"
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flight-service-config
+  namespace: crew-horizon
+data:
+  SERVER_PORT: "8083"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/flight_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "15"
+  JPA_DDL_AUTO: "validate"
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: roster-service-config
+  namespace: crew-horizon
+data:
+  SERVER_PORT: "8084"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/roster_db"
+  DB_USERNAME: "crew_horizon_user"
+  DB_POOL_MAX: "20"
+  JPA_DDL_AUTO: "validate"
+  CREW_SERVICE_URL: "lb://crew-service"
+  FLIGHT_SERVICE_URL: "lb://flight-service"
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: notification-service-config
+  namespace: crew-horizon
+data:
+  SERVER_PORT: "8085"
+  DB_URL: "jdbc:postgresql://postgres-service:5432/notification_db"
+  DB_USERNAME: "crew_horizon_user"
+  SMTP_HOST: "smtp.sendgrid.net"
+  SMTP_PORT: "587"
+  SMTP_USERNAME: "apikey"
+  LOG_LEVEL: "INFO"
+  ENVIRONMENT: "production"

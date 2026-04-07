@@ -1,0 +1,73 @@
+# ============================================================
+# NOTIFICATION SERVICE - Application Configuration
+# ============================================================
+# WHY notification-service is async-first:
+# Sending emails/push notifications is I/O bound and can be slow.
+# Making notifications async means the calling service (roster-service)
+# does NOT wait for the notification to be delivered before responding
+# to the scheduler. This dramatically improves perceived performance.
+server:
+  port: ${SERVER_PORT:8085}
+spring:
+  application:
+    name: notification-service
+  cloud:
+    kubernetes:
+      config:
+        enabled: true
+        name: notification-service-config
+        namespace: crew-horizon
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://postgres-service:5432/notification_db}
+    username: ${DB_USERNAME:crew_horizon_user}
+    password: ${DB_PASSWORD:changeme}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: ${JPA_DDL_AUTO:validate}
+  # WHY task executor config:
+  # @Async methods use a thread pool. Configuring it explicitly
+  # prevents unbounded thread creation under load.
+  task:
+    execution:
+      pool:
+        core-size: 5
+        max-size: 20
+        queue-capacity: 100
+        keep-alive: 60s
+      thread-name-prefix: notification-
+  # Email configuration (SMTP)
+  mail:
+    host: ${SMTP_HOST:smtp.gmail.com}
+    port: ${SMTP_PORT:587}
+    username: ${SMTP_USERNAME:noreply@crew-horizon.com}
+    password: ${SMTP_PASSWORD:}
+    properties:
+      mail:
+        smtp:
+          auth: true
+          starttls:
+            enable: true
+jwt:
+  secret: ${JWT_SECRET:crew-horizon-jwt-secret-key-minimum-32-characters-required}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: notification-service
+logging:
+  level:
+    com.crewhorizon.notificationservice: INFO
+  pattern:
+    console: '{"timestamp":"%d{ISO8601}","level":"%p","service":"notification-service","message":"%m"}%n'

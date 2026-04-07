@@ -1,0 +1,22 @@
+# ============================================================
+# Kubernetes Namespace
+# ============================================================
+# WHAT: Isolates all CREW Horizon resources into their own namespace.
+#
+# WHY Namespaces:
+#   1. ISOLATION: Resources in crew-horizon namespace are logically
+#      separated from other applications on the same K8s cluster.
+#   2. RBAC SCOPE: Role-Based Access Control policies are scoped
+#      per-namespace, enabling fine-grained access control.
+#   3. RESOURCE QUOTAS: Limits on CPU/memory can be applied at
+#      the namespace level to prevent one service starving others.
+#   4. NETWORK POLICIES: Namespace-scoped network policies restrict
+#      which services can communicate with each other.
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: crew-horizon
+  labels:
+    app.kubernetes.io/part-of: crew-horizon
+    environment: production
